@@ -1,0 +1,416 @@
+---
+layout:     post
+title:      "Texture初探"
+date:       2017-08-17
+author:     "Zyw"
+header-img: "img/post-bg-digital-native.jpg"
+catalog: true
+tags:
+    - IOS
+    - Texture
+    - 学习
+---
+
+## 简介
+Texture 是一个 UI 框架，源自 Facebook 的 Paper App。设计的核心目标是:Keeps the most complex iOS user interfaces smooth and responsive。通过将图片解码、字符大小计算和渲染、布局等一些UI处理操作与主线程分离，在后台线程中处理来缓解主线程操作从而提升用户体验。   
+
+## 原理分析
+### Node
+Texture 的基本单位是node，ASDisplayNode是对UIView的抽象（即对CALayer的抽象），不同的是view只能用于主线程，而node是线程安全的。   
+node拥有与UIview和CAlayer等价的绝大部分方法与属性，除少数命名不同外（如.clipsToBounds和.maskToBounds），nodes默认采用UIview中的名称，唯一的不同是nodes用postion替代center   
+可以通过node.view和node.layer来获取view和layer，但是要确保对view和layer的使用在主线程
+UIKit的主要控件都有与之对应的Texture Node。
+
+| UIKit | Texture |
+|---|---|
+| UIView | ASDisplayNode |
+| UITableViewCell & UICollectionViewCell | ASCellNode（用于ASTableNode, ASCollectionNode, ASPagerNode）|
+| UIScrollView | ASScrollNode |
+| UITextView | ASEditableTextNode |
+| UILabel | ASTextNode |
+| UIImage | ASImageNode / ASNetworkImageNode / ASMultiplexImageNode |
+| AVPlayerLayer | ASVideoNode |
+| UIMoviePlayer | ASVideoPlayerNode |
+| UIControl | ASControlNode |
+| UIButton | ASButtonNode |
+| MKMapView | ASMapNode |
+
+
+有些Texture Node 还可能提供一些原有控件没有的特性，比如ASNetworkImageNode会提供下载和缓存管理，支持渐进式JPEG和gif。
+
+所有的Texture Node均继承自ASDisplayNode,其继承层次如下：   
+<img src="https://raw.githubusercontent.com/Janyave/MarkDownPics/master/node-hierarchy.png" style="zoom:30%" />
+
+* ASCellNode可以在创建后设置.style.preferredSize来设定其尺寸，正确尺寸通过实现`-layoutSpecThatFits`来获取。如果设置node.neverShowPlaceholders=0,其表现将与UIKit一致。   
+* ASButtonNode在UIViewController中使用时可能会遇到层次问题（需要手动解决），推荐使用ASViewController。   
+* ASTextNode使用attributed string。   
+* ASControlNode类比于UIControl，不直接使用，其子类包括：ASButtonNode、ASTextNode、ASMapNode、ASImageNode。这样就使Text和Image也拥有了target-action机制。每一个node都有一个hitTestSlop属性用于处理点击区域，不用通过重写`-hitTest:withEvent:`，仅仅对其赋一个UIEdgeInsets的值即可扩展点击响应区域。   
+* ASScrollNode提供自动计算其contentSize的属性automaticallyManagesContentSize,其可以通过子类实现的`-layoutSpecThatFits`或者`.layoutSpecBlock`计算。滚动方向通过属性scrollableDirections来设置。   
+* ASImageNode可以通过设置imageModeficationBlock来进行异步处理变换、圆角，动画等，imageModeficationBlock在Display周期内进行处理。可以通过设置cropRect对图片UIViewContentModeScaleAspectFill放大后裁剪部分进行调整。   
+* ASNetworkImageNode远程获取图片时使用，需要设置.URL属性，对于网络图片加载前应指定图片大小：1.调用.style.preferredSize，2.使用ASRatioLayoutSpec,渐进式JPEG和GIF均需PINRemoteImage支持，图片存储需要PINCache支持。也可自己遵循ASImageCacheProtocol协议去定义自己的缓存。
+* ASVideoNode最简单的使用方式是将AVAsset对象赋值给其asset属性。可以通过简单的布尔值属性设置重复播放、自动播放、静音等。由于其继承自ASNetworkImageNode，所以可以设置placeholderImage。
+* ASMapNode使用主要通过设置.regin(CLLocationCoordinate2D)、.options(MKMapSnapshotOptions)、.annotations(MKPointAnnotation)等属性。
+* ASEditableTextNode使用的也是attributed string，其不支layerbacking，以为能相应用户操作。使用时提供类似UITextView的回调函数。
+* ASMultiplexImageNode在无API或者无渐进式JPEG支持图片时可用于替代ASNetworkingImageNode。典型的使用需要两步：1.设置downloadsIntermediateImages为YES，允许下载低质量图片；2.设置imageIdentifiers属性，其应当是根据图片质量降序的标示数组，标示可在Image加载的时候判断调用哪个URL。
+ 
+### Node Containers
+将app转换成采用texture时常犯的一个错误是直接将nodes添加到一个已经存在的view层次，这样做将会导致在nodes渲染时进行刷新。   
+正确的用法是将nodes作为node container 类的subnodes进行添加，这些container管理其包含的nodes的状态方便数据的载入及nodes的高效渲染，可以把这些node container类认为是UIKit和Texture的结合点      
+Texture提供的Node Container如下：
+
+| UIKit | Texture |
+|---|---|
+| UICollectionView | ASCollectionNode |
+| UIPageViewController | ASPageNode |
+| UITableView | ASTableNode |
+| 实现ASVisibility的UINavigationController | ASNavigationController |
+| 实现ASVisibility的UITabBarController | ASTabBarController |
+
+Node Container管理Node的智能预加载，这样就保证了所有Node的布局计算，数据获取，解码，渲染都是异步处理。如果Node不使用Node Container进行管理，其与UIKit表现类似，都是出现在屏幕上时才进行处理。   
+无论是ASTableNode还是ASCollectionNode均无重用机制，推荐使用nodeBlock方式，返回的nodeBlock必须是线程安全的。ASTableNode和对于ASCollectionNode均不依赖于ASCellNode提供的高度，对于ASTableNode，未提供类似于UITableView的`-tableView:heightForRowAtIndexPath:`方法，高度依赖于node的`-layoutSpecThatFits`返回的layoutSpec。对于ASCollectionNode，需要将layoutSpec封装成一个ASStaticLayoutSpec提供给ASCollectionNode，未来会提供类似于ASTableNode的`-layoutSpecThatFits`。   
+ASViewController可用于替代任何UIViewController(无论内部是否包含UINavigationController、UItabBarViewController,UISplitViewController,或者是作为Model ViewController)。使用ASViewController有两个好处：1.节约内存(ASViewController离屏处理的方式将减少数据获的大小取和界面元素的显示范围？？？)；2.ASVisibility特性，当使用ASNavigationController和ASTabBarController，这些类知道将View Controller展现的精确点击数。
+
+
+### Intelligent Preloading
+每一个Node都有一个当前界面状态的属性（interfaceState），其由Node Container内部生成和维护的ASRangeController进行更新。不在Node Container中使用的Node状态并不会被ASRangeController刷新，可能会导致其出现屏幕上闪一次。      
+![](https://raw.githubusercontent.com/Janyave/MarkDownPics/master/intelligent-preloading-ranges-screenfuls.png)
+
+| Interface State | Description |
+|---|---|
+| Preload | 预加载状态，用于获取内容数据 |
+| Display | 显示状态，用于处理显示事件，如文字光栅化，图片解码等 |
+| Visible | 可见状态，Node在屏幕上展现（至少一个像素） |
+
+每个状态的范围管理的基本单位是屏幕可见范围（screenfuls），每个状态都有个默认值，如上图所示，滚动方向向下，在其滚动的方向Display状态是1.5个可见屏幕范围，反方向是1.0个屏幕可见范围，如果滚动方向上，则其对应的可见返回会翻转。可以通过ASRangeTuningParameters来改变每个状态的范围，只需要设置头和尾对应的范围，不用关心滚动方向，其会自动翻转。
+
+在用户滑动过程中Node处于不同状态时会有回调，方便数据加载和显示渲染等（不要忘记调用super）   
+**VisibeRange:**
+``` 
+-didEnterVisibleState
+-didExitVisibleState
+```
+**DisplayRange:**
+```
+-didEnterDisplayState
+-didExitDisplayState
+```
+**PreloadRange:**
+```
+-didEnterPreloadState
+-didExitPreloadState
+```
+### Subclass
+子类话需要注意区分Node和Node Container。   
+**继承于ASDisplayNode类似于UIView的继承,需要注意以下几个父类方法：**   
+`-init`   
+当用nodeBlocks时在==后台线程==调用，其未执行完成时其他方法无法调用，故不应在其中加锁。不要在此方法中创建UIKit对象、操作UIView和layer、添加手势等（可以放在`-didLoad`中调用），要保证此方法在任何队列中均可调用。   
+`-didLoad`   
+类似于UIViewController的viewDidLoad方法，当后台View装载完成时在==主线程==调用，可用于创建UIKit对象、操作UIView和layer、添加手势等。   
+`-layoutSpecThatFits`   
+此方法用于在后台线程中处理布局和复杂的计算。当创建布局细则返回node大小时调用，主要放置布局代码。布局细则在此方法返回后是不可改变的，所以不建议缓存布局细则。因为是==后台线程==调用，所以不能在此函数中设置任何node.view和node.layer属性。此方法不需要在开始时调用调用父类方法。   
+`-layout`   
+在layoutSpec(计算包括所有子node的距离和位置)结果返回时调用。类似于UIViewController中的`-viewWillLayoutSubviews`,多用于设置显隐属性、非布局属性、背景颜色属性等。此方法在==主线程==调用，如果有需要可以在此设置UIView的frame，如果使用了layoutSpec，就不要过度依赖此函数。
+
+**继承于ASViewController类似于UIViewController的继承，需要注意以下几个父类方法：**   
+*ASViewController需要在主线程创建，其所有方法需要在==主线程==调用*   
+`-init`   
+类似于UIViewController的初始化，此方法在ASVIewController的生命周期中只调用一次。不要再次方法中获取`self.view`和`self.node.view`，这将导致View提前创建，如果想获取应该在`-viewDidLoad`中。此外ASViewController还提供了`-initWithNode`方法。   
+`-loadView`   
+不建议使用，其相对于`-viewDidLoad`没有任何优势，且对self.view进行赋值不安全，而调用`[super loadView]`会将node.view赋值给它。    
+`-viewDidLoad`   
+在`-loadView`之后立即调用，这是最早可以获取node.view的地方，应当处理只执行一次，获取view/layer之类的操作，不要做和布局相关的操作。   
+`-viewWillLayoutSubViews`   
+ 此方法类似于node的layout方法，会在ASViewController的生命周期中多次调用（当ASViewController的node改变或者内部层次变化都会调用），其调用并不是特别频繁，可以将布局代码放在此函数中。   
+`-viewWillAppear:/-viewDidAppear:`   
+类似于UIViewController的`-viewWillAppear:/-viewDidAppear:`
+
+### Layout Engine
+Texture的layout engine具有强大且独特的特性，其基于CSS FlexBox模型，提供了一种特殊定制node的size声明方式用于subnodes的布局。   
+所有nodes的渲染默认都是并发的，通过对每个node提供ASLayoutSpec来实现异步计算和布局。   
+相对于UIKit的Auto Layout其有以下优点：
+- 速度快
+- 异步并行(可在后台线程进行计算，不会被用户操作打断)
+- 声明式布局 (直接被元数据结构赋值易于开发、调试)
+- 可缓存
+- 扩展性高
+
+Layout Specs包含和排列Layout Elements，动画布局需要自动子元素管理(Automatic Subnode Management)支持。
+#### Layout Specs
+是layout specification的简称，其是layout elements的容器，用于表示这些element之间的相互依赖关系。Texture提供一系列ASLayoutSpecs的子类。
+- ASWrapperLayoutSpec   
+ 用于封装一个ASLayoutElement，根据LayoutElement设置的size计算出布局。多用于单个subnode的`-layoutSpecThatFits:`返回，也用于已经设置好subnode布局信息的情况。如果要对一个size添加position应该使用ASAbsoluteLayoutSpec。
+- ASStackLayoutSpec   
+在Texture中最重要最常用的布局，其采用Flexbox算法计算子元素位置和尺寸。Stacklayout提供水平和垂直两种布局方式，支持嵌套，不同屏幕尺寸可以采用同一种布局方式。   
+ASStackLayoutSpec除其&lt;ASLayoutElement&gt;属性还有7个属性
+
+| 属性 | 说明 |
+|---|---|
+| direction |  内部元素的排列方向，如果horizontalAlignment/verticalAlignment已经设置了，将会更改，并更新jusifyContent和alignItems |
+| spacing | 内部元素的间距 |
+| horizontalAlignment | 设置内部元素水平排列，依赖于direction，此项设置将更新jusifyContent和alignItems，如果后来改变了direction，内部元素依然保持 |
+| verticalAlignment | 类比于horizontalAlignment |
+| justifyContent | 内部元素的间距 |
+| alignItems | 内部元素的排列 |
+| flexWrap | 无论内部元素是否线性封装，均当初线性封装 |
+| alignContent | 对于非线性封装，内部元素的多条线的方向 |
+
+- ASInsetLayoutSpec   
+依赖于其内部元素来计算布局，所以在使用ASInsetLayoutSpec其内部元素应该有一个确定的size，如果给UIEdgeInsets设置了一个无限大值，则布局直接使用内部元素size   
+<img src="https://raw.githubusercontent.com/Janyave/MarkDownPics/master/ASInsetLayoutSpec-diagram.png" style="zoom:30%" />
+- ASOverlayLayoutSpec      
+<img src="https://raw.githubusercontent.com/Janyave/MarkDownPics/master/ASOverlayLayouSpec-diagram.png" style="zoom:30%" />      
+ASOverLayoutSpec是使其中一个内部元素(红色)放置在另一个内部元素(蓝色)上层的布局方式。上层布局的时候依赖于下层布局，所以在使用时需要已知下层(蓝色)元素的size。   
+**当自动内部元素管理采用ASOverLayoutSpec时会有显示顺序错乱的问题，现为结局，需要人为保证上层元素在底层元素之后添加**
+- ASBackgroundLayoutSpec   
+类比于ASOverLayoutSpec，自动内部元素管理时也存在问题，需要人为保证上层元素在底层元素之后添加。
+- ASCenterLayoutSpec   
+将其子元素放置在最大的限定尺寸中间，如果center spec的宽度或者高度没有给定，则缩小为其子元素的宽度和高度。   
+其有两个属性：
+    - centeringOptions:设置子元素相对于center spec中心化的维度，可选X，Y，XY
+    - sizingOptins:设置center spec占据的距离，可选：default，minimumX，minimumY，minimumXY   
+<img src="https://raw.githubusercontent.com/Janyave/MarkDownPics/master/ASCenterLayoutSpec-diagram.png" style="zoom:30%" />
+- ASRatioLayoutSpec
+对一个元素设置宽高比的布局方式，设置时其应该已知宽度和高度中的一个维度，多用于ASNetworkImageNode和ASVideoNode(其尺寸在服务器返回时才能确定)。   
+<img src="https://raw.githubusercontent.com/Janyave/MarkDownPics/master/ASRatioLayoutSpec-diagram.png" style="zoom:30%" />
+- ASRelativeLayoutSpec   
+根据给定的宽度或者高度摆放给定的元素，类似于九宫格图片，一个子元素可以放置在任意四个角，或者4个边界中央，或者中心。
+- ASAbsoluteLayoutSpec
+使用ASAbsoluteLayoutSpec，可以直接通过设置元素的layoutPostion来指定其位置，但是灵活性差，且难于管理。其只有一个属性sizing指定元素占有的空间。
+- ASLayoutSpec   
+是以上所有布局的父类，也可以继承定制，或用于占位使用。
+
+#### Layout Elements
+
+所有的ASDisplayNode和ASLayoutSpec均遵循&lt;ASLayoutElement&gt;协议，这样就可以通过不同的node和Layout Spec自由组合生成新的Layout Spec。&lt;ASLayoutElement&gt;协议有一些属性可以用来生成负责的布局，Layout Spec有一系列属性用于管理和调整Layout Element。         
+&lt;ASStackLayoutElement&gt;仅在ASStackLayoutSpec使用，其属性如下
+
+| 属性 | 说明 |
+|---|---|
+| CGFloat .style.spacingBefore | 一个元素在栈方向前的额外距离 |
+| CGFloat .styleSpacingAfter | 一个元素在栈方向后的额外距离 |
+| BOOL .syle.flexGrow | 当所有子元素距离之大于于最小尺寸，是否扩展 |
+| BOOL .style.flexShrink | 当所有子元素的距离只和大于最大尺寸时，是否缩小|
+| ASDimension .style.FlexBasis | 当flexGrow和flexShrink属性应用之前切剩余的距离还在计算时，用于初始化对象的尺寸 |
+| ASStackLayoutAlignSelf .style.alignSelf | 轴对齐的方向，可选：ASStackLayoutAlignSelfAuto，ASStackLayoutAlignSelfStart，ASStackLayoutAlignSelfEnd，ASStackLayoutAlignSelfCenter，ASStackLayoutAlignSelfStretch |
+| CGFloat .style.ascender | 用于基线对齐，元素顶部到其基线的距离 |
+| CGFloat .sytle.descender | 用于基线对其，元素底部到其基线的距离 |   
+
+&lt;ASAbsoluteLayoutElement&gt;仅用于ASAbsoluteLayoutSpec，其属性如下：
+
+
+| 属性 | 说明 |
+|---|---|
+|CGPoint .style.layoutPosition | 元素相对于其父元素的位置 |
+
+
+&lt;ASLayoutElement&gt;属性用于所有layout element
+
+
+| 属性 | 说明 |
+|---|---|
+| ASDimension .syle.width | 元素区域宽度，默认ASDimensionAuto，可被minWith和maxWith覆写 |
+| ASDimension .style.minWidth |  元素最小宽度，防止设置的width小于minWidth，默认ASDimensionAuto，minWidth可覆写maxWidth和width |
+| ASDimension .style.maxWidth | 元素最大宽度，防止设置的width大于maxWidth，默认ASDimensionAuto，maxWidth只能覆写width |
+| ASDimension .style.height/.style.minHeight/.style.maxHeight | 类比于width，minHeiht覆写权限最高 |
+| CGSize .style.preferredSize | 元素的默认尺寸，可选值，当设置了maxSize和minSize时，超出部分将会限制。当未设置此值时，将默认采用元素calculateSizeThatFits提供的尺寸。当元素本来就没有尺寸是需要设置preferredSize和preferredLayoutSize中的一个。直接调用.with和.height将会触发断言 |
+| CGSize .style.minSize/.style.maxSize | 最小(最大)尺寸限制值 当元素宽度或者高度小于(超出)限制值时生效。 |
+| ASLayoutSize .style.preferredLayoutSize | 元素默认关系型尺寸，可选值，当设置了maxLayoutSize和minlayoutSize时，超出部分将会限制。当未设置此值时，将默认采用元素calculateSizeThatFits提供的尺寸 |
+| ASLayoutSize .style.maxLayoutSize/.style.minLayoutSize | 最小(最大)相对尺寸限制值 当元素宽度或者高度小于(超出)限制值时生效 |
+
+
+ASDimension本质上是一个CGFloat值，用于指代一个点值，百分比等。   
+ASLayoutSize类似于CGSize，由ASDimension构成宽高。
+
+### 其他
+- hitTestSlop   
+是ASDisplayNode的一个属性，所以所有的node均可使用，其会影响`-hitTest`和`-pointInside`的默认实现，如果子类复现需要调用父类。hitTestSlop是一个UIEdgeInsets值，如果设置了，可扩大node的响应区域。
+- Batch Fetching API   
+Texture提供一些提前预获取数据的API，可通过设置ASTableNode和ASCollectionNode的leadingScreensForBatching属性，来制定提前多少屏幕区域来提前获取数据。   
+以tablenode为例其包含API
+```
+-shouldBatchFetchForTableNode:
+-tableNode:willBeginBatchFetchWithContext:(background thread)
+-completeBatchFetching:
+```
+- Automatic Subnode Management   
+ASM开启后，就不需要调用addSubnode和removeFromSupernode，node的添加和移除由其在layoutSpecThatFits:出现与否决定。
+使用Layout Transition API时需要开启ASM。
+- Inversion   
+ASTableNode和ASCollectionNode有一个inverted属性，如果设置为YES，将会使显示顺序倒置。但contentInset需要自己去设置。
+- Image Modification Blocks   
+对于imageNode提供一个便利的imageModificationBlock，可以将耗时的操作放在异步线程处理。
+- Placeholders   
+任何一个ASDisplayNode均有一个`-placeholderImage`方法，当`.placeholderEnabled = YES`生效，此外还可以设置`.placeholderFadeDuration`，需要注意的是此方法是异步线程处理的需要注意线程安全。其中`-[UIImage imageNamed:]` 不是线程安全需要使用`-[UIImage imageWithContentsOfFile:]`替代。
+- Accessibility   
+Texture提供了UIKit无法提供的获取每个元数据功能。当使用LayerBacking和Subtree Rasterization时，也可获取每个元素细颗粒度数据(CALayer不支持获取，光栅化将退化成一个扁平的图片)
+- UICollectionViewCell Interoperability   
+ASCollectionNode在ASCellNode的基础上实现了对标准同步UICollectionViewCell的兼容。但是兼容的UIKitCell也无法使用Texture的特性。可以用于测试和调试。    
+如果要使用需要：
+    - 实现`ASCollectionDataSourceInterop`协议，可选实现`ASCollectionDelegateInterop`协议
+    - 在`collectionNode.view`(`viewDidLoad`或者`onDidLoad`)时调用`registerCallClass`
+    - `nodeBlockForItem...:`和`nodeForItem...:`返回nil
+    - 必须实现计算cell尺寸的方法
+        - `UICollectionViewFlowLayout` (包括ASPagerNode)实现 `collectionNode:constrainedSizeForItemAtIndexPath:`
+        - 定制集合布局， 设置`.view.layoutInspector`，实现`collectionView:constrainedSizeForNodeAtIndexPath:`   
+如果设置了`.dequeuesCellsForNodeBackedItems`将会支持cell重用。
+- Layer Backing   
+为了进一步提高App性能，可以对不需要相应用户操作的view转换成layer进行处理，Texture为node提供了`.layerBacked`属性，`rootNode.layerBacked = YES;`可以将整个视图tree转换成layer。
+- Subtree Rasterization   
+将一整个view的层次转换成一个单独的layer进行处理来提高性能`rootNode.shouldRasterizeDescendants = YES;`。
+- Synchronous Concurrency(同步并行)   
+无论是ASViewController还是ASCellNode均包含一个属性`neverShowPlaceholders`如果设置为YES的话，如果Cell的display未完成主线程将会阻塞。但这并不意味着不能使用Texture特性，正常情况下当一个cell展示时preload基本做完了，所以等待时间极短。所有的子node都是并行加载的。   
+这样做只是让ASTableNode使用起来更像UIKit，但其比UIKit快。
+- Corner Rounding   
+CALayer的`.cornerRadius`将触发离屏渲染，成本太高
+- ASVisibility   
+ASNavigationController 和 ASTabBarController实现了ASVisibility协议，对于其栈中的任何一个ViewController均可知道其显示的深度（需要几次点击才能显示）对于navigation stack当一个viewController深度大于等于3时，可能会释放其中的图片，文本等资源。
+- ASEnvironment   
+ASEnvironment提供了一种在node层次之间向上或向下传递数据的方式，其存储了一系列环境元数据，比如特性集合，接口状态，层次状态等。一个遵循ASEnvironment协议的对象可以通过`ASEnvironmentState`在ASEnvironment树中上传和下达特殊状态。其通过数据结构来实现对比与UIKit的创建对象更加轻量级。而如果要查找层级中的环境信息，不用去查询层级树而直接获取，极大地提高了效率。
+- ASRunloopQueue    
+ASRunloopQueue将一些需要在主线程执行的操作延时执行，来缓解主线程压力，所以即便是完全在主线程操作，ASRunloopQueue也将是Texture效率高于UIKit。Texture默认开启ASRunloopQueue
+
+## 核心代码分析
+### 异步处理
+异步处理的核心是`displayAsyncLayer:asynchronously:`函数
+
+```
+- (void)displayAsyncLayer:(_ASDisplayLayer *)asyncLayer asynchronously:(BOOL)asynchronously
+{
+    ...
+    
+  asyncdisplaykit_async_transaction_operation_block_t displayBlock = [self _displayBlockWithAsynchronous:asynchronously isCancelledBlock:isCancelledBlock rasterizing:NO];
+  
+  if (!displayBlock) {
+    return;
+  }
+  
+  ASDisplayNodeAssert(_layer, @"Expect _layer to be not nil");
+  asyncdisplaykit_async_transaction_operation_completion_block_t completionBlock = ^(id<NSObject> value, BOOL canceled){
+    ASDisplayNodeCAssertMainThread();
+    if (!canceled && !isCancelledBlock()) {
+      UIImage *image = (UIImage *)value;
+      BOOL stretchable = (NO == UIEdgeInsetsEqualToEdgeInsets(image.capInsets, UIEdgeInsetsZero));
+      if (stretchable) {
+        ASDisplayNodeSetupLayerContentsWithResizableImage(layer, image);
+      } else {
+        layer.contentsScale = self.contentsScale;
+        layer.contents = (id)image.CGImage;
+      }
+      [self didDisplayAsyncLayer:self.asyncLayer];
+    }
+  };
+
+  [self willDisplayAsyncLayer:self.asyncLayer asynchronously:asynchronously];
+
+  if (asynchronously) {
+    CALayer *containerLayer = layer.asyncdisplaykit_parentTransactionContainer ? : layer;
+    _ASAsyncTransaction *transaction = containerLayer.asyncdisplaykit_asyncTransaction;
+    [transaction addOperationWithBlock:displayBlock priority:self.drawingPriority queue:[_ASDisplayLayer displayQueue] completion:completionBlock];
+  } else {
+    UIImage *contents = (UIImage *)displayBlock();
+    completionBlock(contents, NO);
+  }
+}
+```
+主要流程为`_displayBlockWithAsynchronous:isCancelledBlock:rasterizing:` 返回一个用于 displayBlock，然后构造一个 completionBlock，在绘制结束时执行，在主线程中设置当前 layer 的内容。如果当前的渲染是异步的，就会将 displayBlock 包装成一个事务，添加到队列中执行，否则就会同步执行当前的 block，并执行 completionBlock 回调，通知 layer 更新显示的内容。
+
+### 绘制事件管理
+ASDK 提供了一个私有的管理事务的机制，由三部分组成   
+* _ASAsyncTransactionGroup 会在初始化时，向 Runloop 中注册一个回调，在每次 Runloop 结束时，执行回调来提交 displayBlock 执行的结果   
+* _ASAsyncTransactionContainer 为当前 CALayer 提供了用于保存事务的容器，并提供了获取新的 _ASAsyncTransaction 实例的便利方法   
+* _ASAsyncTransaction 将异步操作封装成了轻量级的事务对象，使用 C++ 代码对 GCD 进行了封装 
+ 
+**注册回调**   
+在 `_ASAsyncTransactionGroup` 调用 `mainTransactionGroup`创建单例时会通过`registerTransactionGroupAsMainRunloopObserver`向runloop注册回调，当runloop退出或者开始休眠时执行回调。
+
+```
++ (void)registerTransactionGroupAsMainRunloopObserver:(_ASAsyncTransactionGroup *)transactionGroup
+{
+  static CFRunLoopObserverRef observer;
+
+  CFRunLoopRef runLoop = CFRunLoopGetCurrent();
+  CFOptionFlags activities = (kCFRunLoopBeforeWaiting | // before the run loop starts sleeping
+                              kCFRunLoopExit);          // before exiting a runloop run
+
+  observer = CFRunLoopObserverCreateWithHandler(NULL,        // allocator
+                                                activities,  // activities
+                                                YES,         // repeats
+                                                INT_MAX,     // order after CA transaction commits
+                                                ^(CFRunLoopObserverRef observer, CFRunLoopActivity activity) {
+                                                  ASDisplayNodeCAssertMainThread();
+                                                  [transactionGroup commit];
+                                                });
+  CFRunLoopAddObserver(runLoop, observer, kCFRunLoopCommonModes);
+  CFRelease(observer);
+}
+```
+
+
+**添加回调事件**
+
+```
+- (void)addOperationWithBlock:(asyncdisplaykit_async_transaction_operation_block_t)block priority:(NSInteger)priority queue:(dispatch_queue_t)queue completion:(asyncdisplaykit_async_transaction_operation_completion_block_t)completion
+{
+  ASAsyncTransactionAssertMainThread();
+  NSAssert(self.state == ASAsyncTransactionStateOpen, @"You can only add operations to open transactions");
+
+  [self _ensureTransactionData];
+
+  ASAsyncTransactionOperation *operation = [[ASAsyncTransactionOperation alloc] initWithOperationCompletionBlock:completion];
+  [_operations addObject:operation];
+  _group->schedule(priority, queue, ^{
+    @autoreleasepool {
+      if (self.state != ASAsyncTransactionStateCanceled) {
+        operation.value = block();
+      }
+    }
+  });
+}
+```
+
+
+**回调处理**   
+当runloop进入休眠或退出时调用注册的的回调`_transactionGroupRunLoopObserverCallback`其会调用`[group commit]`，然后调用到`ASAsyncTransactionQueue::GroupImpl::schedule`通过dispatch_async对block进行处理
+```
+void ASAsyncTransactionQueue::GroupImpl::schedule(NSInteger priority, dispatch_queue_t queue, dispatch_block_t block)
+{
+  ...
+  if (entry._threadCount < maxThreads) {
+
+    bool respectPriority = entry._threadCount > 0;
+    ++entry._threadCount;
+    
+    dispatch_async(queue, ^{
+      std::unique_lock<std::mutex> lock(q._mutex);
+     
+      while (!entry._operationQueue.empty()) {
+        Operation operation = entry.popNextOperation(respectPriority);
+        lock.unlock();
+        if (operation._block) {
+          operation._block();
+        }
+        operation._group->leave();
+        operation._block = nil; 
+        lock.lock();
+      }
+      --entry._threadCount;
+      
+      if (entry._threadCount == 0) {
+        q._entries.erase(queue);
+      }
+    });
+  }
+}
+
+```
+
+## 参考
+1. [http://texturegroup.org/docs/resources.html](http://texturegroup.org/docs/resources.html)
+2. [http://www.appcoda.com/introduction-asyncdisplaykit-2-0/](http://www.appcoda.com/introduction-asyncdisplaykit-2-0/)
+3. [https://www.raywenderlich.com/124696/asyncdisplaykit-2-0-tutorial-automatic-layout](https://www.raywenderlich.com/124696/asyncdisplaykit-2-0-tutorial-automatic-layout)
+4. [https://www.raywenderlich.com/124311/asyncdisplaykit-2-0-tutorial-getting-started](https://www.raywenderlich.com/124311/asyncdisplaykit-2-0-tutorial-getting-started)
+5. [iOS 保持界面流畅的技巧](https://blog.ibireme.com/2015/11/12/smooth_user_interfaces_for_ios/#1)
+6. [使用 ASDK 性能调优 - 提升 iOS 界面的渲染性能](https://segmentfault.com/a/1190000006699632#articleHeader9)
+
+
+
