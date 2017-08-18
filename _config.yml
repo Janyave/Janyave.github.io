@@ -48,15 +48,15 @@ kramdown:
 
 
 # Disqus settings
-disqus_username: zyw
+disqus_username: yave
 
 # Netease setttings
-netease_comment: false
+netease_comment: true
 
 # Duoshuo settings
-duoshuo_username: zywblog
+# duoshuo_username: zywblog
 # Share component is depend on Comment so we can NOT use share only.
-duoshuo_share: true                     # set to false if you want to use Comment without Sharing
+# duoshuo_share: true                     # set to false if you want to use Comment without Sharing
 
 
 
