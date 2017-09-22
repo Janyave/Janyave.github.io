@@ -1,0 +1,48 @@
+---
+layout:     post
+title:      "iPhone X适配"
+date:       2017-09-22
+author:     "Zyw"
+header-img: "img/post-bg-digital-native.jpg"
+catalog: true
+reward: true
+tags:
+    - iOS
+    - iPhone X
+    - 适配
+---
+> 一篇开胃小菜
+
+# What
+iPhone X引入的问题：
+1. 高度变化(相对于iPhone6/7/8增加了145pt)
+2. 四个圆角
+3. 顶部传感器部分
+4. 底部回主页（或切换app）标识
+5. 安全区域引入（顶部44pt，底部34pt） 
+
+#How
+
+### 开发注意事项
+1. 布局使用安全区域，系统控件（UINavigationBar, Tables, collections）均提供了自适应。
+3. 不能写死statusbar高度，应依赖设备而改变
+4. 不建议在iPhoneX上隐藏statusbar（除非需要替换为别的有用信息）
+5. 避免在特别四角，顶部传感器，底部标识部分有用户交互（底部已经有app switch/goto home 手势，四角和传感器部分交互困难）
+6. 不要遮挡或者特殊修饰四角，传感器和底部标识部分（比如用黑色区域隐藏掉传感器两边）
+7. 避免使用系统层级的屏幕边界手势
+8. 建议自动隐藏底部标识
+
+### 适配注意事项
+1. 添加1125*2436px@3x的LaunchImage，适配屏幕尺寸
+2. 检查调整布局使用安全区域
+3. 将写死的statusbar高度，改成由设备决定（20pt or 44 pt）
+4. 将隐藏statusbar的地方在iPhone X上改为不隐藏
+5. 边界交互避免
+6. 如果有系统级别window手势交互，考虑去掉，或者注意与底部手势区分
+
+#参考   
+1. [Human Interface Guidelines
+iOS
+](https://developer.apple.com/ios/human-interface-guidelines/overview/iphone-x/)
+2. [Supporting iPhone X](https://useyourloaf.com/blog/supporting-iphone-x/)
+3. [Safe Area Layout Guide](https://useyourloaf.com/blog/safe-area-layout-guide/)
