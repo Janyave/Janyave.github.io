@@ -40,7 +40,7 @@ iPhone X引入的问题：
 5. 边界交互避免
 6. 如果有系统级别window手势交互，考虑去掉，或者注意与底部手势区分
 
-#参考   
+# 参考   
 1. [Human Interface Guidelines
 iOS
 ](https://developer.apple.com/ios/human-interface-guidelines/overview/iphone-x/)
