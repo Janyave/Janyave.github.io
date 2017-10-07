@@ -5,7 +5,7 @@ date:       2017-08-17
 author:     "Zyw"
 header-img: "img/post-bg-digital-native.jpg"
 catalog: true
-reward: true
+reward: false
 tags:
     - iOS
     - Texture
